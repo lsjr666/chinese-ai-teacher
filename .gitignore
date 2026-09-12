@@ -1,0 +1,22 @@
+# 模型权重与便携运行时（约 41 GB，不入库）
+models/
+runtime/
+
+# 依赖与构建产物
+node_modules/
+dist/
+.venv/
+
+# 本地缓存与工具产物
+.cache/
+.workbuddy/
+.codex-*
+.runtime-logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地密钥（模板 .env.example 保留）
+.env

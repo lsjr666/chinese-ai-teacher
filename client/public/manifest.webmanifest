@@ -1,0 +1,10 @@
+{
+  "name": "中国人能教",
+  "short_name": "中国人能教",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f7f2",
+  "theme_color": "#1c4945",
+  "icons": []
+}

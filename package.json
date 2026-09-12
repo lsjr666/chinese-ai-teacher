@@ -1,0 +1,25 @@
+{
+  "name": "ai-teacher-lan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node server/index.mjs",
+    "dev:client": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "test": "node --test server/*.test.mjs",
+    "check:models": "node scripts/check-models.mjs",
+    "test:models": "python -m unittest discover -s . -p \"test_*.py\" -t ."
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "katex": "^0.18.7",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vite": "^7.1.3"
+  }
+}
