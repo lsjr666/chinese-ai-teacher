@@ -50,7 +50,7 @@ try {
       Write-Host "[1/4] 下载 SQL Server Express 安装包（约 280 MB，视网速 3-15 分钟）..."
       $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
       if (Test-Path $curl) {
-        & $curl.exe --fail --location --retry 3 -o $envelope $envelopeUrl
+        & $curl --fail --location --retry 3 -o $envelope $envelopeUrl
         if ($LASTEXITCODE -ne 0) { throw "curl 下载失败（退出码 $LASTEXITCODE）" }
       } else {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
