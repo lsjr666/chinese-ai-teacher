@@ -34,7 +34,7 @@ try {
   if (Test-Service 'MSSQLSERVER') {
     Write-Host '[1/5] 卸载过期的 Enterprise Evaluation 实例（约 3-5 分钟）...'
     $u1 = Start-Process -FilePath $setupExe -ArgumentList @(
-      '/q','/HIDECONSOLE','/ACTION=Uninstallation','/INSTANCENAME=MSSQLSERVER','/FEATURES=SQLEngine'
+      '/q','/HIDECONSOLE','/ACTION=Uninstall','/INSTANCENAME=MSSQLSERVER','/FEATURES=SQLEngine'
     ) -PassThru -Wait
     Write-Host "      卸载退出码 $($u1.ExitCode)"
     if (Test-Service 'MSSQLSERVER') { Write-Host '      警告：MSSQLSERVER 服务仍在，可能需重启后再卸一次。' }
@@ -47,7 +47,7 @@ try {
   if (Test-Service $serviceName) {
     Write-Host '[2/5] 卸载 C 盘现有 SQLEXPRESS（约 3-5 分钟，库为空无数据损失）...'
     $u2 = Start-Process -FilePath $setupExe -ArgumentList @(
-      '/q','/HIDECONSOLE','/ACTION=Uninstallation','/INSTANCENAME=SQLEXPRESS','/FEATURES=SQLEngine'
+      '/q','/HIDECONSOLE','/ACTION=Uninstall','/INSTANCENAME=SQLEXPRESS','/FEATURES=SQLEngine'
     ) -PassThru -Wait
     Write-Host "      卸载退出码 $($u2.ExitCode)"
     if (Test-Service $serviceName) { throw "SQLEXPRESS 卸载未完成（退出码 $($u2.ExitCode)），中止迁移。" }
