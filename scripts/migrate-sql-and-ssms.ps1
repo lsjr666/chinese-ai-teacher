@@ -23,7 +23,6 @@ $setupExe = 'C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\SQL2022\s
 $envelope = Join-Path $mediaDir 'SQLEXPR_x64_ENU.exe'
 $instance = 'SQLEXPRESS'
 $serviceName = "MSSQL`$$instance"
-$dRoot = 'D:\Microsoft SQL Server'
 
 function Test-Service([string]$Name) {
   return $null -ne (Get-Service -Name $Name -ErrorAction SilentlyContinue)
@@ -56,17 +55,20 @@ try {
   }
 
   # ---------- 3. 重装 SQLEXPRESS 到 D 盘 ----------
+  # 2022 版合法参数：INSTANCEDIR=实例根目录，INSTALLSQLDATADIR=数据根目录（INSTALLSQLDIR 已不被识别）
+  # 路径全部不带空格，避免引号传参被安装器吞掉
   Write-Host '[3/5] 重装 SQLEXPRESS 到 D 盘（10-20 分钟，期间可能无输出，请勿关闭）...'
-  New-Item -ItemType Directory -Force -Path "$dRoot\DATA","$dRoot\Logs","$dRoot\TempDB","$dRoot\Backup" | Out-Null
+  $dRoot = 'D:\SQLServer'
+  New-Item -ItemType Directory -Force -Path $dRoot, "$dRoot\Backup" | Out-Null
+  # 清理上次失败尝试留下的空目录
+  Remove-Item 'D:\Microsoft SQL Server' -Recurse -Force -ErrorAction SilentlyContinue
   $install = Start-Process -FilePath $envelope -ArgumentList @(
     '/q','/HIDECONSOLE',
     '/ACTION=Install','/FEATURES=SQLEngine',
     '/INSTANCENAME=SQLEXPRESS',
-    "/INSTALLSQLDIR=`"$dRoot`"",
-    "/SQLUSERDBDIR=`"$dRoot\DATA`"",
-    "/SQLUSERDBLOGDIR=`"$dRoot\Logs`"",
-    "/SQLTEMPDBDIR=`"$dRoot\TempDB`"",
-    "/SQLBACKUPDIR=`"$dRoot\Backup`"",
+    '/INSTANCEDIR=D:\SQLServer',
+    '/INSTALLSQLDATADIR=D:\SQLServer',
+    '/SQLBACKUPDIR=D:\SQLServer\Backup',
     '/ADDCURRENTUSERASSQLADMIN',
     '/SQLSVCACCOUNT="NT AUTHORITY\SYSTEM"','/SQLSVCSTARTUPTYPE=Automatic',
     '/TCPENABLED=1','/NPENABLED=1',
@@ -172,7 +174,7 @@ SELECT name FROM sys.databases WHERE name='AITeacherDB';
 
   Write-Host ''
   Write-Host '=================== 全部完成 ==================='
-  Write-Host "SQL Server Express：localhost\$instance（主体与数据在 D:\Microsoft SQL Server）"
+  Write-Host "SQL Server Express：localhost\$instance（主体与数据在 D:\SQLServer）"
   Write-Host '数据库：AITeacherDB / dbo.query_records（项目 .env 无需改动）'
   Write-Host "SSMS：$ssmsExe（快捷方式在桌面并固定任务栏）"
   Write-Host '重启后端（start-ai-teacher.bat）后答题记录继续写入新库。'
