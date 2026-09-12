@@ -5,6 +5,19 @@
 //  3. 迁移友好：连接串全部走环境变量（MSSQL_SERVER / MSSQL_DATABASE / MSSQL_USER / MSSQL_PASSWORD），
 //     后续把库搬到云端只需改 .env，代码零改动。
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 轻量 .env 加载（仅补缺，不覆盖已有环境变量），无需引入 dotenv 依赖
+const __dbDirname = path.dirname(fileURLToPath(import.meta.url));
+const envFile = path.resolve(__dbDirname, '..', '.env');
+if (fs.existsSync(envFile)) {
+  for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2];
+  }
+}
 
 const DB_SERVER = process.env.MSSQL_SERVER ?? '(localdb)\\MSSQLLocalDB';
 const DB_NAME = process.env.MSSQL_DATABASE ?? 'AITeacherDB';
