@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>管理端 · 答题记录</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --card: #ffffff; --line: #e3e8f0; --ink: #1f2733; --ink2: #5b6675;
+    --brand: #3b6ef5; --brand-weak: #e8efff; --ok: #1a9e6c; --warn: #c47f17;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; font-size: 14px; }
+  header { display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--ink2); font-size: 12px; margin-top: 2px; }
+  main { max-width: 1180px; margin: 18px auto; padding: 0 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .ip-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; transition: border-color .15s; }
+  .ip-card:hover { border-color: var(--brand); }
+  .ip-card.active { border-color: var(--brand); background: var(--brand-weak); }
+  .ip-card .ip { font-weight: 600; font-size: 15px; }
+  .ip-card .meta { color: var(--ink2); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .toolbar input { flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--line);
+    border-radius: 8px; font-size: 13px; outline: none; background: var(--card); color: var(--ink); }
+  .toolbar input:focus { border-color: var(--brand); }
+  button { padding: 8px 14px; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    border-radius: 8px; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--brand); color: var(--brand); }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button.primary:hover { opacity: .9; color: #fff; }
+  .table-wrap { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 900px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: #f8fafd; color: var(--ink2); font-weight: 500; font-size: 12px; white-space: nowrap; position: sticky; top: 0; }
+  td { font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: #f6f9ff; }
+  .q { max-width: 420px; }
+  .q .clip { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 20px; font-size: 12px; background: var(--brand-weak); color: var(--brand); }
+  .tag.solve { background: #e6f7ef; color: var(--ok); }
+  .tag.grade { background: #fdf3e2; color: var(--warn); }
+  .tag.generate { background: #f0e9fb; color: #7a4bd6; }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 10px 4px; color: var(--ink2); }
+  .empty { text-align: center; color: var(--ink2); padding: 40px 0; }
+  dialog { border: none; border-radius: 12px; padding: 0; width: min(720px, 92vw); box-shadow: 0 20px 60px rgba(0,0,0,.18); }
+  dialog::backdrop { background: rgba(15,23,42,.35); }
+  dialog .head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  dialog .body { padding: 14px 18px; max-height: 62vh; overflow: auto; }
+  dialog pre { background: #f6f8fb; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    font-size: 12px; white-space: pre-wrap; word-break: break-all; font-family: Consolas, monospace; }
+  .kv { display: grid; grid-template-columns: 90px 1fr; gap: 6px 10px; margin-bottom: 12px; font-size: 13px; }
+  .kv b { color: var(--ink2); font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>管理端 · 客户端答题记录</h1>
+    <div class="sub">数据来源：SQL Server AITeacherDB（仅本机/局域网使用）</div>
+  </div>
+  <button onclick="loadAll()">刷新</button>
+</header>
+<main>
+  <div id="ipCards" class="cards"></div>
+  <div class="toolbar">
+    <input id="search" placeholder="按 IP 过滤（点击上方卡片也可快速过滤），回车应用" />
+    <button onclick="applyFilter()">应用</button>
+    <button onclick="clearFilter()">全部</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>时间</th><th>客户端 IP</th><th>类型</th><th>学科</th><th>学段</th>
+        <th class="q">题目文本</th><th>耗时</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="pager">
+    <span id="pageInfo"></span>
+    <button id="prevBtn" onclick="turnPage(-1)">上一页</button>
+    <button id="nextBtn" onclick="turnPage(1)">下一页</button>
+  </div>
+</main>
+
+<dialog id="detail">
+  <div class="head"><span id="dTitle">记录详情</span><button onclick="detail.close()">关闭</button></div>
+  <div class="body">
+    <div class="kv" id="dMeta"></div>
+    <div style="font-weight:600;margin-bottom:6px;">题目文本</div>
+    <pre id="dQuestion"></pre>
+    <div style="font-weight:600;margin:12px 0 6px;">模型调用记录</div>
+    <pre id="dCalls"></pre>
+  </div>
+</dialog>
+
+<script>
+const KIND_LABEL = { solve: '拍照解答', grade: '批改', generate: '出题' };
+let curIp = '';
+let curPage = 1;
+const PAGE_SIZE = 20;
+
+async function loadIps() {
+  const res = await fetch('/api/admin/ips');
+  const { items } = await res.json();
+  const wrap = document.getElementById('ipCards');
+  if (!items.length) { wrap.innerHTML = '<div class="ip-card"><div class="ip">暂无记录</div><div class="meta">学生答题后自动出现在这里</div></div>'; return; }
+  wrap.innerHTML = '';
+  for (const it of items) {
+    const card = document.createElement('div');
+    card.className = 'ip-card' + (curIp === it.clientIp ? ' active' : '');
+    card.innerHTML = `<div class="ip"></div><div class="meta"></div>`;
+    card.querySelector('.ip').textContent = it.clientIp + (it.userName ? '（' + it.userName + '）' : '');
+    card.querySelector('.meta').textContent = `${it.count} 次查询 · 最近 ${it.lastAt}`;
+    card.onclick = () => { curIp = curIp === it.clientIp ? '' : it.clientIp; curPage = 1; loadIps(); loadRecords(); };
+    wrap.appendChild(card);
+  }
+}
+
+async function loadRecords() {
+  const params = new URLSearchParams({ page: curPage, pageSize: PAGE_SIZE });
+  if (curIp) params.set('ip', curIp);
+  const res = await fetch('/api/admin/records?' + params);
+  const { total, items } = await res.json();
+  const tbody = document.getElementById('rows');
+  if (!items.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">没有记录</td></tr>'; }
+  else {
+    tbody.innerHTML = '';
+    for (const r of items) {
+      const tr = document.createElement('tr');
+      tr.className = 'row';
+      const kind = KIND_LABEL[r.kind] ?? r.kind;
+      const dur = r.durationMs != null ? (r.durationMs >= 1000 ? (r.durationMs / 1000).toFixed(1) + ' s' : r.durationMs + ' ms') : '-';
+      tr.innerHTML = `
+        <td style="white-space:nowrap"></td><td style="white-space:nowrap"></td>
+        <td><span class="tag"></span></td><td></td><td></td>
+        <td class="q"><div class="clip"></div></td><td style="white-space:nowrap"></td>`;
+      const cells = tr.querySelectorAll('td');
+      cells[0].textContent = r.time;
+      cells[1].textContent = r.clientIp;
+      cells[2].querySelector('.tag').textContent = kind;
+      cells[2].querySelector('.tag').classList.add(r.kind);
+      cells[3].textContent = r.subject || '-';
+      cells[4].textContent = r.stage || '-';
+      cells[5].querySelector('.clip').textContent = r.questionText;
+      cells[6].textContent = dur;
+      tr.onclick = () => showDetail(r);
+      tbody.appendChild(tr);
+    }
+  }
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  document.getElementById('pageInfo').textContent = `共 ${total} 条 · 第 ${curPage} / ${pages} 页`;
+  document.getElementById('prevBtn').disabled = curPage <= 1;
+  document.getElementById('nextBtn').disabled = curPage >= pages;
+}
+
+function showDetail(r) {
+  document.getElementById('dTitle').textContent = '记录 #' + r.id;
+  const meta = document.getElementById('dMeta');
+  meta.innerHTML = '';
+  const pairs = [
+    ['时间', r.time], ['客户端 IP', r.clientIp], ['用户', r.userName || '-'],
+    ['类型', KIND_LABEL[r.kind] ?? r.kind], ['学科', r.subject || '-'], ['学段', r.stage || '-'],
+    ['实际模式', r.modelMode || '-'], ['耗时', r.durationMs != null ? r.durationMs + ' ms' : '-'],
+  ];
+  for (const [k, v] of pairs) {
+    const b = document.createElement('b'); b.textContent = k;
+    const s = document.createElement('span'); s.textContent = v;
+    meta.append(b, s);
+  }
+  document.getElementById('dQuestion').textContent = r.questionText || '(空)';
+  document.getElementById('dCalls').textContent = r.modelCalls ? JSON.stringify(r.modelCalls, null, 2) : '(无)';
+  document.getElementById('detail').showModal();
+}
+
+function applyFilter() {
+  curIp = document.getElementById('search').value.trim();
+  curPage = 1;
+  loadIps(); loadRecords();
+}
+function clearFilter() {
+  document.getElementById('search').value = '';
+  curIp = ''; curPage = 1;
+  loadIps(); loadRecords();
+}
+function turnPage(delta) { curPage = Math.max(1, curPage + delta); loadRecords(); }
+async function loadAll() { await loadIps(); await loadRecords(); }
+document.getElementById('search').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyFilter(); });
+loadAll();
+setInterval(loadRecords, 30000);
+</script>
+</body>
+</html>

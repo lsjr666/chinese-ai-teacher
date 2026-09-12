@@ -221,3 +221,182 @@ export async function logQueryRecord(record) {
     warnOnce('答题记录写入失败（不影响答题功能）：' + String(error.message ?? error).slice(0, 160));
   }
 }
+
+// ---- 管理端查询：按 IP 分页查记录、按 IP 汇总统计 ----
+// kind 存在 model_calls JSON 里，用 JSON_VALUE 取出；文本里的换行压成空格便于表格展示。
+
+export function buildRecordsSql(ip, offset, limit) {
+  const where = ip ? 'WHERE client_ip = ' + toSqlLiteral(ip) + ' ' : '';
+  return [
+    'SET NOCOUNT ON;',
+    'SELECT id, CONVERT(varchar(23), created_at, 120) AS ts, client_ip, user_name, subject, stage,',
+    "ISNULL(JSON_VALUE(model_calls, '$.kind'), '') AS kind,",
+    "ISNULL(model_mode, '') AS model_mode,",
+    "ISNULL(CAST(duration_ms AS nvarchar(20)), '') AS duration_ms,",
+    "REPLACE(REPLACE(question_text, CHAR(13), ''), CHAR(10), ' ') AS question_text,",
+    "REPLACE(REPLACE(CAST(model_calls AS nvarchar(max)), CHAR(13), ''), CHAR(10), ' ') AS model_calls,",
+    'COUNT(*) OVER() AS total_cnt',
+    'FROM dbo.query_records ' + where,
+    'ORDER BY id DESC',
+    'OFFSET ' + Math.max(0, Number(offset) | 0) + ' ROWS FETCH NEXT ' + Math.max(1, Number(limit) | 0) + ' ROWS ONLY',
+    'FOR XML RAW;',
+  ].join(' ');
+}
+
+export function buildIpStatsSql() {
+  return [
+    'SET NOCOUNT ON;',
+    'SELECT client_ip,',
+    "ISNULL(MAX(user_name), '') AS user_name,",
+    'COUNT(*) AS cnt,',
+    'CONVERT(varchar(23), MIN(created_at), 120) AS first_at,',
+    'CONVERT(varchar(23), MAX(created_at), 120) AS last_at',
+    'FROM dbo.query_records GROUP BY client_ip ORDER BY MAX(id) DESC FOR XML RAW;',
+  ].join(' ');
+}
+
+function decodeXmlEntities(text) {
+  return String(text)
+    .replace(/&#x[0-9a-fA-F]+;/g, (m) => String.fromCodePoint(parseInt(m.slice(3, -1), 16)))
+    .replace(/&#\d+;/g, (m) => String.fromCodePoint(parseInt(m.slice(2, -1), 10)))
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function parseXmlRows(stdout) {
+  const rows = [];
+  for (const tag of String(stdout).match(/<row\b[^>]*\/?>/g) ?? []) {
+    const row = {};
+    for (const m of tag.matchAll(/([\w@]+)="([^"]*)"/g)) {
+      row[m[1]] = decodeXmlEntities(m[2]);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function queryViaSqlcmdText(sqlText) {
+  return new Promise((resolve, reject) => {
+    const args = ['-S', DB_SERVER, '-d', DB_NAME];
+    if (DB_USER) args.push('-U', DB_USER, '-P', DB_PASSWORD);
+    else args.push('-E');
+    args.push('-f', '65001', '-h', '-1', '-y', '0');
+    const child = spawn(SQLCMD_EXE, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error('sqlcmd 查询超时'));
+    }, SQLCMD_TIMEOUT_MS);
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`sqlcmd 查询退出码 ${code} ${stderr.slice(0, 200)}`));
+    });
+    child.stdin.end(sqlText + '\nGO\n', 'utf8');
+  });
+}
+
+// msnodesqlv8 对 FOR XML 返回 [{ 列名: '<row .../>' }]，取出含 <row 的字符串列
+function extractXml(raw) {
+  if (typeof raw === 'string') return raw;
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  if (first && typeof first === 'object') {
+    for (const value of Object.values(first)) {
+      if (typeof value === 'string' && value.includes('<row')) return value;
+    }
+  }
+  return '';
+}
+
+async function queryRecordsOdbc(ip, offset, limit) {
+  const sql = odbcModule.default ?? odbcModule;
+  const connStr = odbcConnectionString();
+  const where = ip ? 'WHERE client_ip = ? ' : '';
+  const sqlText = [
+    'SELECT id, CONVERT(varchar(23), created_at, 120) AS ts, client_ip, user_name, subject, stage,',
+    "ISNULL(JSON_VALUE(model_calls, '$.kind'), '') AS kind,",
+    'ISNULL(model_mode, ' + "''" + ') AS model_mode,',
+    "ISNULL(CAST(duration_ms AS nvarchar(20)), '') AS duration_ms,",
+    "REPLACE(REPLACE(question_text, CHAR(13), ''), CHAR(10), ' ') AS question_text,",
+    "REPLACE(REPLACE(CAST(model_calls AS nvarchar(max)), CHAR(13), ''), CHAR(10), ' ') AS model_calls,",
+    'COUNT(*) OVER() AS total_cnt',
+    'FROM dbo.query_records ' + where,
+    'ORDER BY id DESC OFFSET ? ROWS FETCH NEXT ? ROWS ONLY FOR XML RAW;',
+  ].join(' ');
+  const params = ip ? [ip, offset, limit] : [offset, limit];
+  const raw = await new Promise((resolve, reject) => {
+    sql.query(connStr, sqlText, params, (error, result) => (error ? reject(error) : resolve(result)));
+  });
+  return parseXmlRows(extractXml(raw));
+}
+
+export async function queryRecords({ ip = '', page = 1, pageSize = 20 } = {}) {
+  if (!transport) await initDbTransport();
+  if (transport === 'off') return { total: 0, items: [] };
+  const limit = Math.min(100, Math.max(1, Number(pageSize) || 20));
+  const offset = (Math.max(1, Number(page) || 1) - 1) * limit;
+  let rows;
+  if (transport === 'odbc') rows = await queryRecordsOdbc(ip || null, offset, limit);
+  else rows = parseXmlRows(await queryViaSqlcmdText(buildRecordsSql(ip, offset, limit)));
+  const total = rows.length ? Number(rows[0].total_cnt || 0) : 0;
+  return {
+    total,
+    items: rows.map((r) => ({
+      id: Number(r.id),
+      time: r.ts,
+      clientIp: r.client_ip,
+      userName: r.user_name || null,
+      subject: r.subject || null,
+      stage: r.stage || null,
+      kind: r.kind || 'solve',
+      modelMode: r.model_mode || null,
+      durationMs: r.duration_ms ? Number(r.duration_ms) : null,
+      questionText: r.question_text || '',
+      modelCalls: safeJsonParse(r.model_calls),
+    })),
+  };
+}
+
+export async function queryIpStats() {
+  if (!transport) await initDbTransport();
+  if (transport === 'off') return [];
+  const rows = transport === 'odbc'
+    ? await (async () => {
+        const sql = odbcModule.default ?? odbcModule;
+        const raw = await new Promise((resolve, reject) => {
+          sql.query(
+            odbcConnectionString(),
+            [
+              'SELECT client_ip, ISNULL(MAX(user_name), ' + "''" + ') AS user_name, COUNT(*) AS cnt,',
+              'CONVERT(varchar(23), MIN(created_at), 120) AS first_at,',
+              'CONVERT(varchar(23), MAX(created_at), 120) AS last_at',
+              'FROM dbo.query_records GROUP BY client_ip ORDER BY MAX(id) DESC FOR XML RAW;',
+            ].join(' '),
+            (error, result) => (error ? reject(error) : resolve(result)),
+          );
+        });
+        return parseXmlRows(extractXml(raw));
+      })()
+    : parseXmlRows(await queryViaSqlcmdText(buildIpStatsSql()));
+  return rows.map((r) => ({
+    clientIp: r.client_ip,
+    userName: r.user_name || null,
+    count: Number(r.cnt || 0),
+    firstAt: r.first_at,
+    lastAt: r.last_at,
+  }));
+}
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildInsertSql, sanitizeValue, toSqlLiteral, resetDbTransport } from './db.mjs';
+import { buildInsertSql, buildRecordsSql, buildIpStatsSql, sanitizeValue, toSqlLiteral, resetDbTransport } from './db.mjs';
 
 test('sanitizeValue 剔除 NUL 与危险控制字符', () => {
   assert.equal(sanitizeValue('a\0b\u0007c'), 'abc');
@@ -43,4 +43,21 @@ test('buildInsertSql 可空字段渲染为 NULL', () => {
   const sql = buildInsertSql({ clientIp: '127.0.0.1', questionText: 'x' });
   assert.ok(sql.includes('NULL, NULL, NULL,'));
   assert.ok(sql.trimEnd().endsWith('NULL );'));
+});
+
+test('buildRecordsSql 分页与 IP 过滤（含注入转义）', () => {
+  const sql = buildRecordsSql("1.2.3.4'; DROP TABLE x;--", 20, 20);
+  assert.ok(sql.includes("WHERE client_ip = N'1.2.3.4''; DROP TABLE x;--'"));
+  assert.ok(sql.includes('OFFSET 20 ROWS FETCH NEXT 20 ROWS ONLY'));
+  assert.ok(sql.includes('FOR XML RAW;'));
+  assert.ok(sql.includes("JSON_VALUE(model_calls, '$.kind')"));
+  const noIp = buildRecordsSql('', 0, 10);
+  assert.ok(!noIp.includes('WHERE'));
+  assert.ok(noIp.includes('OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY'));
+});
+
+test('buildIpStatsSql 按客户端 IP 汇总', () => {
+  const sql = buildIpStatsSql();
+  assert.ok(sql.includes('GROUP BY client_ip'));
+  assert.ok(sql.includes('ORDER BY MAX(id) DESC'));
 });

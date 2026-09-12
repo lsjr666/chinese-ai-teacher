@@ -7,7 +7,7 @@ import { getConnectionInfo } from './network.mjs';
 import { findKnowledgePoint, getKnowledgePoints } from './knowledge-points.mjs';
 import { generateQuestion, getModelStatus, runVisionTask } from './model-adapter.mjs';
 import { createTask, getTaskSnapshot } from './task-store.mjs';
-import { logQueryRecord, initDbTransport } from './db.mjs';
+import { logQueryRecord, initDbTransport, queryRecords, queryIpStats } from './db.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -165,7 +165,30 @@ async function routeApi(request, response, pathname) {
     });
     return sendJson(response, 200, { result });
   }
+  if (request.method === 'GET' && pathname === '/api/admin/records') {
+    const url = new URL(request.url, 'http://localhost');
+    const result = await queryRecords({
+      ip: (url.searchParams.get('ip') ?? '').trim(),
+      page: Number(url.searchParams.get('page') ?? 1),
+      pageSize: Number(url.searchParams.get('pageSize') ?? 20),
+    });
+    return sendJson(response, 200, result);
+  }
+  if (request.method === 'GET' && pathname === '/api/admin/ips') {
+    return sendJson(response, 200, { items: await queryIpStats() });
+  }
   return sendJson(response, 404, { error: '接口不存在。' });
+}
+
+function serveAdminPage(response, pathname) {
+  if (pathname !== '/admin' && pathname !== '/admin/') {
+    response.writeHead(404);
+    response.end('Not found');
+    return;
+  }
+  const adminFile = path.join(__dirname, 'admin', 'admin.html');
+  response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  fs.createReadStream(adminFile).pipe(response);
 }
 
 function serveStatic(response, pathname) {
@@ -201,6 +224,10 @@ const server = http.createServer(async (request, response) => {
   try {
     if (url.pathname.startsWith('/api/')) {
       await routeApi(request, response, url.pathname);
+      return;
+    }
+    if (url.pathname === '/admin' || url.pathname === '/admin/') {
+      serveAdminPage(response, url.pathname);
       return;
     }
     serveStatic(response, url.pathname);
