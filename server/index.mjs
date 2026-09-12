@@ -7,6 +7,7 @@ import { getConnectionInfo } from './network.mjs';
 import { findKnowledgePoint, getKnowledgePoints } from './knowledge-points.mjs';
 import { generateQuestion, getModelStatus, runVisionTask } from './model-adapter.mjs';
 import { createTask, getTaskSnapshot } from './task-store.mjs';
+import { logQueryRecord, initDbTransport } from './db.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -56,6 +57,15 @@ function validateImagePayload(payload) {
   }
 }
 
+function normalizeClientIp(request) {
+  const forwarded = request.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  const raw = request.socket?.remoteAddress ?? 'unknown';
+  return raw.replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+}
+
 async function routeApi(request, response, pathname) {
   if (request.method === 'GET' && pathname === '/api/health') {
     const model = await getModelStatus();
@@ -96,10 +106,27 @@ async function routeApi(request, response, pathname) {
     requestLog(requestId, 'image body read (' + Buffer.byteLength(payload.imageDataUrl ?? '', 'utf8') + ' bytes)');
     validateImagePayload(payload);
     const kind = pathname.endsWith('/grade') ? 'grade' : 'solve';
+    const clientIp = normalizeClientIp(request);
+    const startedAt = Date.now();
+    const stages = [];
     const task = createTask(async () => {
       try {
         const result = await runVisionTask(kind, payload, {
-          onStage: (stage) => requestLog(requestId, stage),
+          onStage: (stage) => {
+            stages.push(stage);
+            requestLog(requestId, stage);
+          },
+        });
+        stages.push('completed');
+        logQueryRecord({
+          clientIp,
+          kind,
+          subject: payload.subject ?? result.subject ?? null,
+          stage: payload.stage ?? null,
+          questionText: payload.problemText || result.problemText || '(图片中未识别出题目文本)',
+          modelMode: result.mode ?? null,
+          modelCalls: { requestId, kind, stages },
+          durationMs: Date.now() - startedAt,
         });
         requestLog(requestId, 'completed (' + JSON.stringify(result).length + ' bytes)');
         return result;
@@ -121,12 +148,22 @@ async function routeApi(request, response, pathname) {
     const payload = await readJson(request);
     const point = findKnowledgePoint(payload.knowledgePointId);
     if (!point) throw new Error('请选择有效的知识点。');
-    return sendJson(response, 200, {
-      result: await generateQuestion({
-        ...payload,
-        knowledgePointName: point.name,
-      }),
+    const startedAt = Date.now();
+    const result = await generateQuestion({
+      ...payload,
+      knowledgePointName: point.name,
     });
+    logQueryRecord({
+      clientIp: normalizeClientIp(request),
+      kind: 'generate',
+      subject: point.subject ?? null,
+      stage: point.stage ?? null,
+      questionText: `出题：${point.name}`,
+      modelMode: result?.mode ?? null,
+      modelCalls: { kind: 'generate' },
+      durationMs: Date.now() - startedAt,
+    });
+    return sendJson(response, 200, { result });
   }
   return sendJson(response, 404, { error: '接口不存在。' });
 }
@@ -175,4 +212,5 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, '0.0.0.0', () => {
   console.log(`AI Teacher server listening on ${port}`);
   for (const url of getConnectionInfo(port).urls) console.log(`LAN: ${url}`);
+  initDbTransport().catch(() => {});
 });

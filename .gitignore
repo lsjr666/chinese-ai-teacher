@@ -20,3 +20,6 @@ __pycache__/
 
 # 本地密钥（模板 .env.example 保留）
 .env
+
+# 工具杂散文件
+.workbuddy*
