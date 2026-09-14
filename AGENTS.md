@@ -32,6 +32,13 @@
   题目原文（`problem` / `studentAnswer`）渲染进 prompt——只传字段清单会导致科学模型返回全空。
 - "有响应但字段全空"由 `hasVisibleAnswer()` 判定并回退，**不允许出现空白答案卡**。
 - 科学请求默认 240s 超时（`SCIENCE_MODEL_TIMEOUT_MS`），失败后熔断冷却 180s（`SCIENCE_COOLDOWN_MS`）。
+- **视觉请求也必须有超时**（默认 180s，`VISION_MODEL_TIMEOUT_MS`）：llama.cpp 会「假死」——
+  端口在听、`/health` 正常、请求被接受（`/slots` 里 `n_prompt_tokens` 有值但 `processed=0`）却永不返回。
+  没有超时学生就只会看到一直转圈的加载态（表现为「没有输出」）。
+- 视觉结果为空（照片没读清、证明题、图内无文字）时由 `ensureVisibleAnswer()` 兜底，
+  给出「换一张更清楚的照片再试 / 可勾选深度思考」的提示，**不得出现模型名**。
+- **数学服务的提示词必须显式要求中文输出**：Qwen2.5-Math-7B 训练语料偏英文，
+  提示词里不写「一律使用简体中文作答」就会整篇用英文回答（`math_service/math_server.py`）。
 
 ## 4. UI 红线
 
@@ -48,7 +55,7 @@
 ## 6. 常用命令
 
 ```powershell
-# 后端测试（Node 内置测试器，当前 47 项）
+# 后端测试（Node 内置测试器，当前 57 项）
 node --test server/*.test.mjs
 
 # 模型服务测试

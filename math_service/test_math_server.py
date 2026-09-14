@@ -13,7 +13,10 @@ class MathServerRegressionTests(unittest.TestCase):
         self.assertIn("x > 0", prompt)
         self.assertIn("e^x > 1+x", prompt)
         self.assertIn("ln x <= x-1", prompt)
-        self.assertIn("Do not replace a proof with finite-value testing", prompt)
+        # 证明题必须要求逐步解析证明，而不是试值
+        self.assertIn("不要用有限几个数值的检验", prompt)
+        # 输出语言必须是中文（Qwen2.5-Math 默认倾向英文作答）
+        self.assertIn("一律使用简体中文", prompt)
 
     def test_generation_passes_attention_mask_and_uses_2048_tokens(self):
         class FakeTensor:

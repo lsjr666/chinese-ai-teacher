@@ -81,14 +81,15 @@ def load_model() -> None:
 def make_prompt(request: SolveRequest) -> str:
     student = request.studentAnswer or "（没有提供学生作答，只求解题目）"
     return f"""你是严谨的中学数学老师。请解答下面的数学问题，并仔细检查每一步计算。
-First identify the domain and choose a short, rigorous, checkable analytic proof. For proof questions, prefer standard inequalities, monotonicity, and equivalent transformations. Do not replace a proof with finite-value testing, trial values, numerical search, approximate extrema, Lambert W, or numerical root finding. Finish every proof and state the conclusion explicitly.
-For "prove e^x > ln x + 2", state x > 0 first, then use e^x > 1+x and ln x <= x-1 to derive e^x - ln x - 2 > 0. This requires a strict analytic proof, not trial values or a numerical minimum.
+先判断题目的知识范围与定义域，再给出简短、严谨、可逐步检验的解析过程。证明题请优先使用标准不等式、单调性和等价变形；不要用有限几个数值的检验、试值、数值搜索、近似极值、Lambert W 或数值求根来代替证明。每一步都要写完整，最后明确写出结论。
+例如“证明 e^x > ln x + 2”：先说明 x > 0，再用 e^x > 1+x 与 ln x <= x-1 推出 e^x - ln x - 2 > 0。这必须是一步一步的严格解析证明，不能只做试值或求数值最小值。
 题目：
 {request.problem}
 
 学生作答：
 {student}
 
+所有字段一律使用简体中文作答（数学公式与符号除外），不要出现整句英文，也不要只给结论而省略推导。
 请只返回一个简短 JSON 对象，不要输出 Markdown 代码块、推导之外的说明或重复题目。字段必须是：
 answer（最终答案字符串）、steps（字符串数组，每步包含公式和理由）、keyIdeas（字符串数组）、knowledgePoints（字符串数组）、scorePercent（0 到 100 的数字）、verdict（批改结论）、mistakes（字符串数组）、suggestions（字符串数组）、problemText（题目原文）、studentAnswer（作答原文）。
 如果没有学生作答，scorePercent 填 0，verdict 留空。所有公式可以使用 LaTeX。"""
@@ -99,7 +100,8 @@ def make_generate_prompt(request: GenerateRequest) -> str:
 知识点：{request.knowledgePointName}
 难度：{request.difficulty}
 
-请只返回一个 JSON 对象，不要输出 Markdown 代码块。字段必须是：question、options（字符串数组）、referenceAnswer、explanation、knowledgePoints（字符串数组）。题目条件完整，答案唯一，公式可以使用 LaTeX。"""
+请只返回一个 JSON 对象，不要输出 Markdown 代码块。字段必须是：question、options（字符串数组）、referenceAnswer、explanation、knowledgePoints（字符串数组）。题目条件完整，答案唯一，公式可以使用 LaTeX。
+所有字段一律使用简体中文（数学公式与符号除外），不要出现整句英文。"""
 
 
 def generate_text(prompt: str) -> str:

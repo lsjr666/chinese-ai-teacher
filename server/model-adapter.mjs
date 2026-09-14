@@ -427,6 +427,19 @@ export function scienceRequestOptions(environment = process.env) {
 // a message that says what happened.
 const DEFAULT_SCIENCE_TIMEOUT_MS = 240000;
 
+// The vision model is the busiest path (every solve/grade request goes through
+// it) and it can wedge in exactly the same way: the request is accepted, the
+// prompt is counted, and then nothing is ever processed, so no answer and no
+// error ever comes back. A normal image request takes 15-25 seconds; anything
+// past this deadline is a stuck server, not a slow answer.
+const DEFAULT_VISION_TIMEOUT_MS = 180000;
+
+export function visionRequestOptions(environment = process.env) {
+  const configured = Number(environment.VISION_MODEL_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_VISION_TIMEOUT_MS;
+  return { timeoutMs };
+}
+
 // After a science failure we skip the specialised model for a while. The likely
 // causes (server wedged, weights being paged out under memory pressure, GPU
 // contention) do not fix themselves between two questions, and retrying means
@@ -459,7 +472,7 @@ async function fetchWithTimeout(url, init, timeoutMs) {
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new Error(`模型在 ${Math.round(timeoutMs / 1000)} 秒内没有返回任何内容（服务可能已卡死）。`));
+      reject(new Error(`本次推理超过 ${Math.round(timeoutMs / 1000)} 秒仍未返回（服务可能已卡住）。请重新发起；若反复出现，请重启电脑端服务。`));
     }, timeoutMs);
   });
   const pending = fetch(url, { ...init, signal: controller.signal });
@@ -568,6 +581,28 @@ function hasVisibleAnswer(result) {
     .trim().length > 0;
 }
 
+// The vision model answers plenty of questions that it cannot actually read:
+// a blurry photo, a proof, a question with no text in it. It then returns JSON
+// whose every field is empty, and the student is shown a blank answer card that
+// looks like a crash. Give them something actionable instead. Model names and
+// routing stay out of the UI, so the wording only talks about the photo and the
+// retry - never about which model ran.
+const NO_VISIBLE_ANSWER_MESSAGE =
+  '这次没有识别出可显示的答案。请换一张更清晰的题目照片再试一次（文字正对镜头、光线均匀、拍全题目）。';
+
+export function ensureVisibleAnswer(result) {
+  if (hasVisibleAnswer(result)) return result;
+  const answer = String(result.answer ?? '').trim();
+  return {
+    ...result,
+    answer: answer || NO_VISIBLE_ANSWER_MESSAGE,
+    suggestions: [
+      ...(result.suggestions ?? []),
+      '如果题目比较复杂，可以勾选“深度思考”后再试一次。',
+    ],
+  };
+}
+
 async function requestLocalChat(kind, payload, correction = '', onStage = () => {}, environment = process.env, options = {}) {
   onStage('vision request started');
   const config = getRuntimeConfig(environment);
@@ -592,7 +627,7 @@ async function requestLocalChat(kind, payload, correction = '', onStage = () => 
 
 async function callLocalChat(kind, payload, onStage = () => {}, environment = process.env, stageName = 'vision') {
   const first = normalizeTaskResult(
-    { mode: stageName === 'vision' ? 'local' : 'science', ...(await requestLocalChat(kind, payload, '', onStage, environment)) },
+    { mode: stageName === 'vision' ? 'local' : 'science', ...(await requestLocalChat(kind, payload, '', onStage, environment, visionRequestOptions(environment))) },
     kind,
   );
   return first;
@@ -762,7 +797,7 @@ export async function runVisionTask(kind, payload, { onStage = () => {}, mathReq
   // 未勾选深度思考时，语文、英语、数学和自然科学都沿用 Qwen3-VL 的结果。
   if (!payload.deepThink) {
     onStage('deep thinking not selected; using vision result');
-    return { ...vision, mode: 'local-vision' };
+    return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
   }
 
   // 勾选深度思考且识别为自然科学（物理、化学、生物、地理）时，交给 Intern-S1-mini。
@@ -772,11 +807,11 @@ export async function runVisionTask(kind, payload, { onStage = () => {}, mathReq
     onStage('science task detected');
     if (scienceIsCoolingDown()) {
       onStage(`science model cooling down: ${scienceCooldown.reason}`);
-      return { ...vision, mode: 'local-vision' };
+      return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
     }
     const scienceStatus = await getScienceModelStatus();
     onStage(`science model available: ${scienceStatus.available}`);
-    if (!scienceStatus.available) return { ...vision, mode: 'local-vision' };
+    if (!scienceStatus.available) return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
     try {
       const science = await callScienceChat(kind, buildScienceSolvePayload({
         imageDataUrl: payload.imageDataUrl,
@@ -788,7 +823,7 @@ export async function runVisionTask(kind, payload, { onStage = () => {}, mathReq
       // The model replied but left every field empty. Showing that would be worse
       // than the answer the vision model already produced.
       onStage('science model returned no visible answer; using vision result');
-      return { ...vision, mode: 'local-vision' };
+      return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
     } catch (error) {
       // The 8B science model can legitimately fail: weights still downloading,
       // not enough RAM for the first load, a wedged llama.cpp server, or a slow
@@ -797,19 +832,19 @@ export async function runVisionTask(kind, payload, { onStage = () => {}, mathReq
       // next question is answered immediately instead of waiting again.
       onStage(`science model failed; falling back to vision: ${error.message}`);
       noteScienceFailure(error.message);
-      return { ...vision, mode: 'local-vision' };
+      return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
     }
   }
 
   // 勾选深度思考但不属于自然科学时，只有数学会交给 Qwen2.5-Math。
   if (!isMathTask(vision)) {
     onStage('non-math result returned from vision model');
-    return { ...vision, mode: 'local-vision' };
+    return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
   }
   onStage('math task detected');
   const mathStatus = await getMathModelStatus();
   onStage(`math model available: ${mathStatus.available}`);
-  if (!mathStatus.available) return { ...vision, mode: 'local-vision' };
+  if (!mathStatus.available) return ensureVisibleAnswer({ ...vision, mode: 'local-vision' });
   return await callMathService('/math/solve', buildMathSolvePayload({
     problemText: vision.problemText || vision.answer,
     answerText: vision.studentAnswer,
@@ -836,5 +871,5 @@ export async function generateQuestion(payload) {
   }
   const status = await getModelStatus();
   if (!status.available) throw new Error('本地模型不可用。');
-  return await callLocalGenerate(payload);
+  return await callLocalGenerate(payload, process.env, 'local', visionRequestOptions());
 }

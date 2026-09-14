@@ -17,6 +17,8 @@ import {
   requestJsonNoTimeout,
   resetScienceCooldown,
   scienceRequestOptions,
+  visionRequestOptions,
+  ensureVisibleAnswer,
 } from './model-adapter.mjs';
 import http from 'node:http';
 
@@ -679,6 +681,70 @@ test('science requests carry a deadline so a wedged server cannot hang the app',
   assert.equal(scienceRequestOptions({ SCIENCE_MODEL_TIMEOUT_MS: '90000' }).timeoutMs, 90000);
   assert.equal(scienceRequestOptions({ SCIENCE_MODEL_TIMEOUT_MS: '0' }).timeoutMs, 240000);
   assert.equal(scienceRequestOptions({ SCIENCE_MODEL_TIMEOUT_MS: 'abc' }).timeoutMs, 240000);
+});
+
+// Every solve/grade request goes through the vision model, and that server can
+// wedge the same way the science one does: request accepted, prompt counted, no
+// token ever produced. Without a deadline the student stares at a spinner with
+// no answer and no error, which is exactly what "没有输出" looks like.
+test('vision requests carry a deadline so a wedged server fails instead of hanging', () => {
+  assert.equal(visionRequestOptions({}).timeoutMs, 180000);
+  assert.equal(visionRequestOptions({ VISION_MODEL_TIMEOUT_MS: '45000' }).timeoutMs, 45000);
+  assert.equal(visionRequestOptions({ VISION_MODEL_TIMEOUT_MS: '0' }).timeoutMs, 180000);
+  assert.equal(visionRequestOptions({ VISION_MODEL_TIMEOUT_MS: 'abc' }).timeoutMs, 180000);
+});
+
+// A photo the vision model cannot read comes back as JSON with every field empty.
+// Rendering that is a blank answer card, so the student gets a message and a
+// concrete next step - never a model name, because the UI must not expose which
+// model ran.
+test('an empty result is replaced by an actionable message, not a blank card', () => {
+  const empty = ensureVisibleAnswer({
+    mode: 'local-vision',
+    kind: 'solve',
+    answer: '',
+    steps: [],
+    keyIdeas: [],
+    knowledgePoints: [],
+    suggestions: [],
+  });
+
+  assert.ok(empty.answer.length > 0);
+  assert.ok(empty.suggestions.length > 0);
+  const text = [empty.answer, ...empty.suggestions].join(' ');
+  for (const forbidden of ['模型', 'Qwen', 'Intern', '本地视觉', '深度科学']) {
+    assert.ok(!text.includes(forbidden), `提示文案不应出现「${forbidden}」`);
+  }
+});
+
+test('a result that already has content is passed through untouched', () => {
+  const filled = { mode: 'local-vision', kind: 'solve', answer: 'x = 4', steps: ['移项'], suggestions: [] };
+  assert.equal(ensureVisibleAnswer(filled), filled);
+});
+
+test('a hung vision request reports a timeout instead of spinning forever', async () => {  const originalFetch = global.fetch;
+  const originalTimeout = process.env.VISION_MODEL_TIMEOUT_MS;
+  process.env.VISION_MODEL_TIMEOUT_MS = '80';
+  global.fetch = async (url) => {
+    if (String(url).endsWith('/models')) {
+      return { ok: true, json: async () => ({ data: [{ id: 'Qwen3-VL-4B-Instruct' }] }) };
+    }
+    if (String(url).endsWith('/chat/completions')) {
+      // Accepts the request, then never answers (the wedged-server pattern).
+      return new Promise(() => {});
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  try {
+    await assert.rejects(
+      () => runVisionTask('solve', { imageDataUrl: 'data:image/png;base64,ZmFrZQ==', deepThink: false }),
+      /超过 0 秒仍未返回|仍未返回/,
+    );
+  } finally {
+    global.fetch = originalFetch;
+    if (originalTimeout === undefined) delete process.env.VISION_MODEL_TIMEOUT_MS;
+    else process.env.VISION_MODEL_TIMEOUT_MS = originalTimeout;
+  }
 });
 
 // A wedged llama.cpp server keeps the port open, answers /health with "ok", and
