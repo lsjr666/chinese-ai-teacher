@@ -1,6 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
-import katex from 'katex';
-import 'katex/dist/katex.min.css';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   BookOpen,
@@ -9,25 +7,33 @@ import {
   CheckCircle2,
   CircleAlert,
   ClipboardCheck,
-  Copy,
+  Clock,
   FileQuestion,
   GraduationCap,
+  Layers,
   Lightbulb,
   LoaderCircle,
+  Moon,
   RefreshCw,
   ScanLine,
   Send,
   Settings2,
-  Sparkles,
+  Sun,
+  Type,
   Upload,
   Wifi,
 } from 'lucide-react';
 import { getRestoredTaskView } from './task-state.mjs';
+import { ResultPanel } from './result-view.jsx';
+import { HistoryPanel } from './history-panel.jsx';
+import { exportWord, printPage } from './export.mjs';
+import { SCALES, THEMES, initTheme, readScale, readTheme, saveScale, saveTheme, watchSystemTheme } from './theme.mjs';
 
 const modes = [
   { id: 'solve', label: '拍照搜题', short: '解题', icon: ScanLine, description: '看懂题目，拆解思路' },
   { id: 'generate', label: '知识点命题', short: '命题', icon: FileQuestion, description: '按要求生成练习题' },
   { id: 'grade', label: '拍照批改', short: '批改', icon: ClipboardCheck, description: '识别过程，给出反馈' },
+  { id: 'history', label: '历史记录', short: '记录', icon: Clock, description: '回看搜过、出过、改过的题' },
 ];
 
 const stages = ['小学', '初中', '高中'];
@@ -36,20 +42,8 @@ const stageSubjects = {
   初中: ['语文', '数学', '英语', '物理', '化学', '生物', '地理'],
   高中: ['语文', '数学', '英语', '物理', '化学', '生物', '地理'],
 };
-const questionTypesBySubject = {
-  语文: ['选择题', '填空题', '阅读题', '作文题'],
-  英语: ['选择题', '填空题', '阅读题', '作文题'],
-  数学: ['选择题', '填空题', '解答题'],
-  物理: ['选择题', '填空题', '解答题', '实验探究题'],
-  化学: ['选择题', '填空题', '解答题', '实验探究题'],
-  生物: ['选择题', '填空题', '解答题', '实验探究题'],
-  地理: ['选择题', '填空题', '解答题'],
-};
 const difficulties = ['基础', '进阶', '挑战'];
-
-function getQuestionTypes(subject) {
-  return questionTypesBySubject[subject] ?? ['选择题', '填空题', '解答题'];
-}
+const MAX_POINTS_PER_QUESTION = 3;
 
 function getApiBase() {
   return localStorage.getItem('ai-teacher-server') || '';
@@ -112,6 +106,38 @@ function compressImage(file) {
   });
 }
 
+// 题型必须同时适用于所有选中的知识点；没有交集时退化成并集（与服务端同一套规则）。
+function intersectTypes(points) {
+  const lists = points.map((point) => (point?.questionTypes?.length ? point.questionTypes : ['解答题']));
+  if (!lists.length) return ['解答题'];
+  if (lists.length === 1) return [...lists[0]];
+  const shared = lists[0].filter((type) => lists.slice(1).every((list) => list.includes(type)));
+  if (shared.length) return shared;
+  const merged = [];
+  for (const list of lists) for (const type of list) if (!merged.includes(type)) merged.push(type);
+  return merged;
+}
+
+// 「一次出一张卷子」的配额：把总题数按 5:3:2 分给前三个可用题型，
+// 剩下的零头补给最后一个，保证配额之和正好等于总题数。
+function buildQuota(types, total) {
+  const active = types.slice(0, 3);
+  const quota = {};
+  if (!active.length || total <= 0) return quota;
+  const weights = [0.5, 0.3, 0.2].slice(0, active.length);
+  const sum = weights.reduce((acc, value) => acc + value, 0);
+  let assigned = 0;
+  active.forEach((type, index) => {
+    const value =
+      index === active.length - 1
+        ? Math.max(0, total - assigned)
+        : Math.max(1, Math.round((total * weights[index]) / sum));
+    quota[type] = value;
+    assigned += value;
+  });
+  return quota;
+}
+
 function StatusPill({ connected }) {
   return (
     <div className={`status-pill ${connected ? 'is-online' : 'is-offline'}`}>
@@ -162,119 +188,6 @@ function ImageDropzone({ mode, image, onImage, busy }) {
   );
 }
 
-function ResultSection({ title, icon: Icon, children, tone = '' }) {
-  return (
-    <section className={`result-section ${tone}`}>
-      <div className="result-section-title"><Icon size={17} /><span>{title}</span></div>
-      {children}
-    </section>
-  );
-}
-
-function renderInlineMarkdown(text) {
-  const parts = String(text ?? '').split(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\*\*[^*]+\*\*|`[^`]+`)/g);
-  return parts.map((part, index) => {
-    if (part.startsWith('$$') && part.endsWith('$$')) return <div className="math-block" key={index}>{part.slice(2, -2)}</div>;
-    if (part.startsWith('$') && part.endsWith('$')) return <span className="math-inline" key={index}>{part.slice(1, -1)}</span>;
-    if (part.startsWith('**') && part.endsWith('**')) return <strong key={index}>{part.slice(2, -2)}</strong>;
-    if (part.startsWith('`') && part.endsWith('`')) return <code key={index}>{part.slice(1, -1)}</code>;
-    return part;
-  });
-}
-
-function MarkdownText({ value, className = '' }) {
-  const source = String(value ?? '')
-    .replace(/\\\(([^\n]*?)\\\)/g, '$$$1$$')
-    .replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$')
-    .replace(/#{3,}/g, '')
-    .replace(/\*{2,}/g, '');
-  const pieces = source.split(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$)/g);
-  return <div className={`markdown-text ${className}`}>{pieces.map((piece, index) => {
-    const display = piece.startsWith('$$') && piece.endsWith('$$');
-    const inline = piece.startsWith('$') && piece.endsWith('$');
-    if (display || inline) {
-      const formula = piece.slice(display ? 2 : 1, display ? -2 : -1);
-      try {
-        return <span className={display ? 'math-block' : 'math-inline'} key={index} dangerouslySetInnerHTML={{ __html: katex.renderToString(formula, { displayMode: display, throwOnError: false, strict: false }) }} />;
-      } catch {
-        return <span key={index}>{piece}</span>;
-      }
-    }
-    return <span key={index}>{piece}</span>;
-  })}</div>;
-}
-
-function ResultPanel({ mode, result, busy, onCopy }) {
-  if (busy) {
-    return (
-      <div className="result-empty is-loading">
-        <LoaderCircle className="spin" size={27} />
-        <strong>模型正在推理</strong>
-        <span>页面刷新后也会自动恢复，模型完成前不会返回空结果</span>
-      </div>
-    );
-  }
-  if (!result) {
-    return (
-      <div className="result-empty">
-        <div className="empty-orbit"><Brain size={25} /></div>
-        <strong>{mode === 'generate' ? '生成的题目会出现在这里' : '分析结果会出现在这里'}</strong>
-        <span>{mode === 'grade' ? '上传作答照片，查看得分与改进建议' : '提交后将看到答案、过程和知识点'}</span>
-      </div>
-    );
-  }
-  return (
-    <div className="result-content">
-      {mode === 'generate' ? (
-        <>
-          <ResultSection title="生成题目" icon={FileQuestion}>
-            <MarkdownText value={result.question || result.answer} className="question-text" />
-            {result.options?.length > 0 && (
-              <div className="option-list">{result.options.map((option) => <div key={option}>{option}</div>)}</div>
-            )}
-          </ResultSection>
-          <ResultSection title="参考答案" icon={CheckCircle2} tone="answer-tone">
-            <MarkdownText value={result.referenceAnswer} className="answer-text" />
-            <MarkdownText value={result.explanation} />
-          </ResultSection>
-        </>
-      ) : (
-        <>
-          {mode === 'grade' && (
-            <div className="score-hero">
-              <div><span>本次得分</span><strong>{result.scorePercent}<small>%</small></strong></div>
-              <div className="score-ring" style={{ '--score': `${result.scorePercent * 3.6}deg` }}><span>{result.scorePercent}</span></div>
-            </div>
-          )}
-          <ResultSection title={mode === 'grade' ? '批改结论' : '最终答案'} icon={mode === 'grade' ? ClipboardCheck : CheckCircle2} tone="answer-tone">
-            <MarkdownText value={mode === 'grade' ? result.verdict : result.answer} className="answer-text" />
-            {mode === 'grade' && <MarkdownText value={result.answer} />}
-          </ResultSection>
-          {result.steps?.length > 0 && (
-            <ResultSection title="解题过程" icon={ArrowRight}>
-              <ol className="step-list">{result.steps.map((step, index) => <li key={`${step}-${index}`}><span>{index + 1}</span><MarkdownText value={step} /></li>)}</ol>
-            </ResultSection>
-          )}
-          {result.keyIdeas?.length > 0 && (
-            <ResultSection title="关键思路" icon={Lightbulb}>
-              <ul className="bullet-list">{result.keyIdeas.map((idea) => <li key={idea}><MarkdownText value={idea} /></li>)}</ul>
-            </ResultSection>
-          )}
-          {mode === 'grade' && (
-            <ResultSection title="改进建议" icon={Lightbulb}>
-              <ul className="bullet-list">{[...(result.mistakes ?? []), ...(result.suggestions ?? [])].map((item) => <li key={item}><MarkdownText value={item} /></li>)}</ul>
-            </ResultSection>
-          )}
-        </>
-      )}
-      {result.knowledgePoints?.length > 0 && (
-        <div className="knowledge-row"><span>涉及知识点</span>{result.knowledgePoints.map((point) => <em key={point}>{point}</em>)}</div>
-      )}
-      <button className="copy-button" onClick={() => onCopy(result)}><Copy size={15} /> 复制结果</button>
-    </div>
-  );
-}
-
 function App() {
   const [initialTask] = useState(getInitialTaskState);
   const [mode, setMode] = useState(initialTask.mode);
@@ -282,29 +195,48 @@ function App() {
   const [points, setPoints] = useState([]);
   const [image, setImage] = useState(initialTask.image);
   const [result, setResult] = useState(null);
+  const [paper, setPaper] = useState([]);
+  const [progress, setProgress] = useState(null);
   const [busy, setBusy] = useState(initialTask.busy);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
   const [stage, setStage] = useState('小学');
   const [subject, setSubject] = useState('数学');
-  const [pointId, setPointId] = useState('primary-math-fractions');
+  const [pointIds, setPointIds] = useState(['primary-math-fractions']);
   const [questionType, setQuestionType] = useState('解答题');
   const [difficulty, setDifficulty] = useState('基础');
   const [deepThink, setDeepThink] = useState(() => Boolean(initialTask.task?.deepThink));
   const [activeTask, setActiveTask] = useState(initialTask.task);
+  const [batchMode, setBatchMode] = useState(false);
+  const [quota, setQuota] = useState({});
+  const [themePref, setThemePref] = useState(() => readTheme());
+  const [scale, setScale] = useState(() => readScale());
 
   const filteredPoints = useMemo(
     () => points.filter((point) => point.stage === stage && point.subject === subject),
     [points, stage, subject],
   );
 
+  const selectedPoints = useMemo(
+    () => pointIds.map((id) => filteredPoints.find((point) => point.id === id)).filter(Boolean),
+    [pointIds, filteredPoints],
+  );
+  const availableQuestionTypes = useMemo(() => intersectTypes(selectedPoints), [selectedPoints]);
   const availableSubjects = stageSubjects[stage] ?? ['语文', '数学', '英语'];
-  const availableQuestionTypes = getQuestionTypes(subject);
+  const quotaTotal = useMemo(
+    () => Object.values(quota).reduce((acc, value) => acc + (Number(value) || 0), 0),
+    [quota],
+  );
   const engines = [
     { key: 'vision', role: '视觉识别', name: 'Qwen3-VL', available: Boolean(health?.model?.available) },
     { key: 'math', role: '数学专用', name: 'Qwen2.5-Math', available: Boolean(health?.mathModel?.available) },
-    { key: 'science', role: '深度科学', name: 'Intern-S1-mini', available: Boolean(health?.scienceModel?.available) },
+    { key: 'science', role: '深度科学', name: 'S1-mini', available: Boolean(health?.scienceModel?.available) },
   ];
+
+  const showToast = useCallback((message) => {
+    setToast(message);
+    setTimeout(() => setToast(''), 2400);
+  }, []);
 
   const checkHealth = async () => {
     try {
@@ -316,6 +248,11 @@ function App() {
       setError(`无法连接电脑端：${err.message}`);
     }
   };
+
+  useEffect(() => {
+    initTheme();
+    return watchSystemTheme(() => setThemePref('system'));
+  }, []);
 
   useEffect(() => {
     Promise.all([checkHealth(), apiRequest('/api/knowledge-points').then((data) => setPoints(data.items)).catch(() => {})]);
@@ -354,8 +291,12 @@ function App() {
   }, [activeTask]);
 
   useEffect(() => {
-    if (filteredPoints.length && !filteredPoints.some((point) => point.id === pointId)) setPointId(filteredPoints[0].id);
-  }, [filteredPoints, pointId]);
+    if (!filteredPoints.length) return;
+    setPointIds((current) => {
+      const kept = current.filter((id) => filteredPoints.some((point) => point.id === id));
+      return kept.length ? kept : [filteredPoints[0].id];
+    });
+  }, [filteredPoints]);
 
   useEffect(() => {
     const list = stageSubjects[stage] ?? [];
@@ -363,14 +304,22 @@ function App() {
   }, [stage, subject]);
 
   useEffect(() => {
-    const list = getQuestionTypes(subject);
-    if (list.length && !list.includes(questionType)) setQuestionType(list[0]);
-  }, [subject, questionType]);
+    const list = availableQuestionTypes;
+    if (!list.length) return;
+    setQuestionType((current) => (list.includes(current) ? current : list[0]));
+    setQuota((current) => {
+      const next = {};
+      for (const type of list) next[type] = Number(current[type]) || 0;
+      return next;
+    });
+  }, [availableQuestionTypes]);
 
   useEffect(() => {
-    if (activeTask?.mode === mode) return;
+    if (activeTask?.mode === mode || mode === 'history') return;
     setImage(null);
     setResult(null);
+    setPaper([]);
+    setProgress(null);
     setError('');
     if (activeTask) {
       setActiveTask(null);
@@ -379,7 +328,19 @@ function App() {
   }, [mode]);
 
   const currentMode = modes.find((item) => item.id === mode);
-  const selectedPoint = points.find((point) => point.id === pointId);
+
+  const togglePoint = (id) => {
+    setPointIds((current) => {
+      if (current.includes(id)) {
+        return current.length > 1 ? current.filter((item) => item !== id) : current;
+      }
+      if (current.length >= MAX_POINTS_PER_QUESTION) {
+        showToast(`一道题最多同时考查 ${MAX_POINTS_PER_QUESTION} 个知识点`);
+        return current;
+      }
+      return [...current, id];
+    });
+  };
 
   const submitImageTask = async () => {
     if (!image?.dataUrl) {
@@ -388,6 +349,8 @@ function App() {
     }
     setBusy(true);
     setError('');
+    setPaper([]);
+    setProgress(null);
     try {
       const data = await apiRequest(`/api/${mode}`, {
         method: 'POST',
@@ -406,10 +369,18 @@ function App() {
   const generate = async () => {
     setBusy(true);
     setError('');
+    setPaper([]);
+    setProgress(null);
     try {
       const data = await apiRequest('/api/generate', {
         method: 'POST',
-        body: JSON.stringify({ stage, subject, knowledgePointId: pointId, questionType, difficulty }),
+        body: JSON.stringify({
+          stage,
+          subject,
+          knowledgePointIds: pointIds,
+          questionType,
+          difficulty,
+        }),
       });
       setResult(data.result);
     } catch (err) {
@@ -419,13 +390,92 @@ function App() {
     }
   };
 
+  // 批量出题走 NDJSON 流式：一道题一出结果，边生成边显示。
+  const generateBatch = async () => {
+    const selections = Object.entries(quota)
+      .filter(([, count]) => Number(count) > 0)
+      .map(([type, count]) => ({ knowledgePointIds: pointIds, questionType: type, difficulty, count: Number(count) }));
+    if (!selections.length) {
+      setError('请至少给一种题型设置出题数量。');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setResult(null);
+    setPaper([]);
+    setProgress({ done: 0, total: selections.reduce((acc, item) => acc + item.count, 0) });
+    try {
+      const response = await fetch(`${getApiBase()}/api/generate/batch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ stage, subject, selections }),
+      });
+      if (!response.ok || !response.body) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `请求失败（${response.status}）`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let done = 0;
+      for (;;) {
+        const { value, done: finished } = await reader.read();
+        if (finished) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let chunk;
+          try {
+            chunk = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (chunk.type === 'plan') {
+            setProgress({ done: 0, total: chunk.total });
+            if (chunk.errors?.length) showToast(chunk.errors[0]);
+          } else if (chunk.type === 'question') {
+            done += 1;
+            setPaper((current) => [...current, { ...chunk.result, order: chunk.index, questionType: chunk.questionType, difficulty: chunk.difficulty, knowledgePointNames: chunk.knowledgePointNames }]);
+            setProgress({ done, total: chunk.total });
+          } else if (chunk.type === 'failed') {
+            done += 1;
+            setProgress({ done, total: chunk.total });
+            setError(`第 ${chunk.index} 道题生成失败：${chunk.message}`);
+          } else if (chunk.type === 'done') {
+            setProgress({ done: chunk.succeeded, total: chunk.total });
+            showToast(`已生成 ${chunk.succeeded} 道题${chunk.failed ? `，${chunk.failed} 道失败` : ''}`);
+          }
+        }
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+      setTimeout(() => setProgress(null), 1200);
+    }
+  };
+
   const copyResult = async (value) => {
     // 复制出去的内容不包含「由哪个模型作答」的字段：走回退时用户不应察觉。
     const visible = { ...(value ?? {}) };
     delete visible.mode;
     await navigator.clipboard?.writeText(JSON.stringify(visible, null, 2));
-    setToast('结果已复制');
-    setTimeout(() => setToast(''), 1800);
+    showToast('结果已复制');
+  };
+
+  const exportCurrent = (includeAnswer) => {
+    const items = paper.length ? paper : result ? [result] : [];
+    if (!items.length) return;
+    exportWord({
+      title: paper.length ? `${stage}${subject}练习卷` : `${stage}${subject} · ${questionType}`,
+      subtitle: [stage, subject, ...pointIds.map((id) => filteredPoints.find((point) => point.id === id)?.name).filter(Boolean)].join(' '),
+      filename: paper.length ? `${stage}${subject}练习卷` : `${stage}${subject}${questionType}`,
+      results: items,
+      includeAnswer,
+    });
+    showToast('已导出 Word 文档，可直接打开编辑或打印');
   };
 
   const handleImage = (value) => {
@@ -433,19 +483,44 @@ function App() {
     setError(value.error || '');
   };
 
+  const changeTheme = (value) => {
+    setThemePref(value);
+    saveTheme(value);
+  };
+
+  const changeScale = (value) => {
+    setScale(value);
+    saveScale(value);
+  };
+
+  const setQuotaValue = (type, value) => {
+    setQuota((current) => ({ ...current, [type]: Math.max(0, Math.min(20, Math.floor(Number(value) || 0))) }));
+  };
+
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className="topbar no-print">
         <div className="brand"><div className="brand-mark"><GraduationCap size={21} /></div><div><strong>中国人能教</strong></div></div>
         <div className="topbar-actions">
+          <label className="mini-field" title="主题">
+            {themePref === 'dark' ? <Moon size={15} /> : themePref === 'system' ? <Settings2 size={15} /> : <Sun size={15} />}
+            <select value={themePref} onChange={(event) => changeTheme(event.target.value)}>
+              {THEMES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
+          <label className="mini-field" title="字号">
+            <Type size={15} />
+            <select value={scale} onChange={(event) => changeScale(event.target.value)}>
+              {SCALES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
           <StatusPill connected={Boolean(health?.ok)} />
           <button className="icon-button" title="刷新连接状态" onClick={checkHealth}><RefreshCw size={17} /></button>
-          <button className="icon-button" title="连接设置" onClick={() => setToast('电脑端服务默认地址：当前页面所在电脑的 8787 端口')}><Settings2 size={17} /></button>
         </div>
       </header>
 
       <main className="workspace">
-        <aside className="side-rail">
+        <aside className="side-rail no-print">
           <div className="rail-heading"><span>学习工作台</span><span className="rail-line" /></div>
           <nav className="mode-nav">
             {modes.map((item) => {
@@ -470,42 +545,187 @@ function App() {
             <div><h1>{currentMode.label}</h1><p>{currentMode.description}</p></div>
           </div>
 
-          <div className={`work-grid ${mode === 'generate' ? 'generate-grid' : ''}`}>
-            <section className="task-panel">
-              <div className="panel-head"><div><span className="panel-kicker">STEP 01</span><h2>{mode === 'generate' ? '设置出题要求' : '上传照片'}</h2></div><span className="panel-icon">{mode === 'generate' ? <BookOpen size={18} /> : <Camera size={18} />}</span></div>
-              {mode === 'generate' ? (
-                <div className="form-stack">
-                  <div className="form-row two"><label>学段<select value={stage} onChange={(event) => setStage(event.target.value)}>{stages.map((item) => <option key={item}>{item}</option>)}</select></label><label>学科<select value={subject} onChange={(event) => setSubject(event.target.value)}>{availableSubjects.map((item) => <option key={item}>{item}</option>)}</select></label></div>
-                  <label>知识点<select value={pointId} onChange={(event) => setPointId(event.target.value)}>{filteredPoints.map((point) => <option key={point.id} value={point.id}>{point.name} · {point.description}</option>)}</select></label>
-                  {selectedPoint && <div className="point-preview"><BookOpen size={16} /><div><strong>{selectedPoint.name}</strong><span>{selectedPoint.description}</span></div></div>}
-                  <div className="form-row two"><label>题型<select value={questionType} onChange={(event) => setQuestionType(event.target.value)}>{availableQuestionTypes.map((item) => <option key={item}>{item}</option>)}</select></label><label>难度<select value={difficulty} onChange={(event) => setDifficulty(event.target.value)}>{difficulties.map((item) => <option key={item}>{item}</option>)}</select></label></div>
-                  <button className="primary-button" onClick={generate} disabled={busy || !health?.ok}><Sparkles size={17} />{busy ? '电脑端生成中…' : '生成一道练习题'}<ArrowRight size={17} /></button>
+          {mode === 'history' ? (
+            <div className="work-grid">
+              <HistoryPanel apiRequest={apiRequest} onToast={showToast} />
+            </div>
+          ) : (
+            <div className={`work-grid ${mode === 'generate' ? 'generate-grid' : ''}`}>
+              <section className="task-panel">
+                <div className="panel-head">
+                  <div><span className="panel-kicker">STEP 01</span><h2>{mode === 'generate' ? '设置出题要求' : '上传照片'}</h2></div>
+                  <span className="panel-icon">{mode === 'generate' ? <BookOpen size={18} /> : <Camera size={18} />}</span>
                 </div>
-              ) : (
-                <div className="form-stack">
-                  <ImageDropzone mode={mode} image={image} onImage={handleImage} busy={busy} />
-                  <label className="deep-think-option">
-                    <input type="checkbox" checked={deepThink} onChange={(event) => setDeepThink(event.target.checked)} disabled={busy} />
-                    <span className="checkbox-mark" aria-hidden="true"><CheckCircle2 size={14} /></span>
-                    <span>深度思考（可能消耗较长时间）</span>
-                  </label>
-                  <div className="task-tip"><Lightbulb size={16} /><span>{mode === 'grade' ? '尽量拍全题目、完整作答过程和最终答案，批改会更准确。' : '保持文字清晰、光线均匀，数学公式尽量正对镜头。'}</span></div>
-                  <button className="primary-button" onClick={submitImageTask} disabled={busy || !health?.ok}><Send size={17} />{busy ? '模型推理中…' : mode === 'grade' ? '开始批改' : '开始解题'}<ArrowRight size={17} /></button>
+                {mode === 'generate' ? (
+                  <div className="form-stack">
+                    <div className="form-row two">
+                      <label>学段<select value={stage} onChange={(event) => setStage(event.target.value)}>{stages.map((item) => <option key={item}>{item}</option>)}</select></label>
+                      <label>学科<select value={subject} onChange={(event) => setSubject(event.target.value)}>{availableSubjects.map((item) => <option key={item}>{item}</option>)}</select></label>
+                    </div>
+                    <div className="field-block">
+                      <label>
+                        知识点
+                        <span className="field-hint">可多选，最多 {MAX_POINTS_PER_QUESTION} 个（复合知识点会融合在同一道题里）</span>
+                      </label>
+                      <div className="chip-row">
+                        {filteredPoints.map((point) => (
+                          <button
+                            type="button"
+                            key={point.id}
+                            className={`chip ${pointIds.includes(point.id) ? 'is-active' : ''}`}
+                            onClick={() => togglePoint(point.id)}
+                          >
+                            {point.name}
+                          </button>
+                        ))}
+                      </div>
+                      {selectedPoints.length > 0 && (
+                        <div className="point-preview">
+                          <BookOpen size={16} />
+                          <div>
+                            <strong>{selectedPoints.map((point) => point.name).join(' + ')}</strong>
+                            <span>{selectedPoints.map((point) => point.description).join('；')}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="field-block">
+                      <label>
+                        题型
+                        <span className="field-hint">只列出该知识点真正适合的题型</span>
+                      </label>
+                      <div className="chip-row">
+                        {availableQuestionTypes.map((type) => (
+                          <button
+                            type="button"
+                            key={type}
+                            className={`chip ${questionType === type && !batchMode ? 'is-active' : ''} ${batchMode ? 'is-muted' : ''}`}
+                            onClick={() => setQuestionType(type)}
+                            disabled={batchMode}
+                          >
+                            {type}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="form-row two">
+                      <label>难度<select value={difficulty} onChange={(event) => setDifficulty(event.target.value)}>{difficulties.map((item) => <option key={item}>{item}</option>)}</select></label>
+                      <label>
+                        出题方式
+                        <select value={batchMode ? 'batch' : 'single'} onChange={(event) => setBatchMode(event.target.value === 'batch')}>
+                          <option value="single">单道出题</option>
+                          <option value="batch">批量 / 一份卷子</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    {batchMode && (
+                      <div className="batch-box">
+                        <div className="batch-head">
+                          <strong><Layers size={15} /> 题型配额</strong>
+                          <span>共 {quotaTotal} 道题</span>
+                        </div>
+                        <div className="quota-list">
+                          {availableQuestionTypes.map((type) => (
+                            <label className="quota-row" key={type}>
+                              <span>{type}</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max="20"
+                                value={quota[type] ?? 0}
+                                onChange={(event) => setQuotaValue(type, event.target.value)}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                        <div className="chip-row">
+                          <button type="button" className="chip" onClick={() => setQuota(buildQuota(availableQuestionTypes, 6))}>6 道小练习</button>
+                          <button type="button" className="chip" onClick={() => setQuota(buildQuota(availableQuestionTypes, 12))}>12 道单元卷</button>
+                          <button type="button" className="chip" onClick={() => setQuota(buildQuota(availableQuestionTypes, 8))}>8 道巩固卷</button>
+                          <button type="button" className="chip" onClick={() => setQuota({})}>清空</button>
+                        </div>
+                        <div className="task-tip"><Lightbulb size={16} /><span>每完成一道题就会立刻显示在右侧。批量出题会逐题生成，题越多越慢，建议一次不超过 12 道。</span></div>
+                      </div>
+                    )}
+
+                    {batchMode ? (
+                      <button className="primary-button" onClick={generateBatch} disabled={busy || !health?.ok || quotaTotal === 0}>
+                        <Layers size={17} />{busy ? '正在生成…' : `生成 ${quotaTotal} 道题`}<ArrowRight size={17} />
+                      </button>
+                    ) : (
+                      <button className="primary-button" onClick={generate} disabled={busy || !health?.ok}>
+                        <FileQuestion size={17} />{busy ? '电脑端生成中…' : '生成一道练习题'}<ArrowRight size={17} />
+                      </button>
+                    )}
+                    <div className="export-row">
+                      <button type="button" className="ghost-button" onClick={() => exportCurrent(true)} disabled={!paper.length && !result}>
+                        导出 Word（含答案）
+                      </button>
+                      <button type="button" className="ghost-button" onClick={() => exportCurrent(false)} disabled={!paper.length && !result}>
+                        仅题目
+                      </button>
+                      <button type="button" className="ghost-button" onClick={printPage} disabled={!paper.length && !result}>
+                        打印
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="form-stack">
+                    <ImageDropzone mode={mode} image={image} onImage={handleImage} busy={busy} />
+                    <label className="deep-think-option">
+                      <input type="checkbox" checked={deepThink} onChange={(event) => setDeepThink(event.target.checked)} disabled={busy} />
+                      <span className="checkbox-mark" aria-hidden="true"><CheckCircle2 size={14} /></span>
+                      <span>深度思考（可能消耗较长时间）</span>
+                    </label>
+                    <div className="task-tip"><Lightbulb size={16} /><span>{mode === 'grade' ? '尽量拍全题目、完整作答过程和最终答案，批改会更准确。' : '保持文字清晰、光线均匀，数学公式尽量正对镜头；一页有多道题也可以一起拍。'}</span></div>
+                    <button className="primary-button" onClick={submitImageTask} disabled={busy || !health?.ok}><Send size={17} />{busy ? '模型推理中…' : mode === 'grade' ? '开始批改' : '开始解题'}<ArrowRight size={17} /></button>
+                    <div className="export-row">
+                      <button type="button" className="ghost-button" onClick={() => exportCurrent(true)} disabled={!result}>
+                        导出 Word
+                      </button>
+                      <button type="button" className="ghost-button" onClick={printPage} disabled={!result}>
+                        打印
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {error && <div className="notice error"><CircleAlert size={16} />{error}</div>}
+                {!health?.ok && <div className="connection-help"><Wifi size={16} /><span>请让手机和电脑连接同一个手机热点，并确认电脑端服务已启动。</span></div>}
+              </section>
+
+              <section className="result-panel">
+                <div className="panel-head">
+                  <div><span className="panel-kicker">STEP 02</span><h2>{mode === 'generate' ? '生成的题目' : '教师反馈'}</h2></div>
+                  {busy && progress && <span className="panel-icon"><LoaderCircle className="spin" size={18} /></span>}
                 </div>
-              )}
-              {error && <div className="notice error"><CircleAlert size={16} />{error}</div>}
-              {!health?.ok && <div className="connection-help"><Wifi size={16} /><span>请让手机和电脑连接同一个手机热点，并确认电脑端服务已启动。</span></div>}
-            </section>
-
-            <section className="result-panel">
-              <div className="panel-head"><div><span className="panel-kicker">STEP 02</span><h2>教师反馈</h2></div></div>
-              <ResultPanel mode={mode} result={result} busy={busy} onCopy={copyResult} />
-            </section>
-          </div>
-
+                {busy && !paper.length && !result ? (
+                  <ResultPanel mode={mode} result={null} results={[]} busy progress={progress} />
+                ) : (
+                  <>
+                    {busy && progress && (
+                      <div className="streaming-hint no-print">
+                        <LoaderCircle className="spin" size={15} />
+                        正在生成第 {progress.done} / {progress.total} 道题…
+                      </div>
+                    )}
+                    <ResultPanel
+                      mode={mode}
+                      result={result}
+                      results={paper}
+                      busy={false}
+                      onCopy={copyResult}
+                      onExportWord={exportCurrent}
+                      onPrint={printPage}
+                    />
+                  </>
+                )}
+              </section>
+            </div>
+          )}
         </section>
       </main>
-      {toast && <div className="toast"><CheckCircle2 size={16} />{toast}</div>}
+      {toast && <div className="toast no-print"><CheckCircle2 size={16} />{toast}</div>}
     </div>
   );
 }

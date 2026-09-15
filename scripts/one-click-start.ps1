@@ -18,10 +18,21 @@ if (-not (Test-ListeningPort 8080)) {
   ) -WorkingDirectory $root
 }
 
+# 数学服务：权重下完后优先用 GGUF + llama.cpp —— 同一个 CPU 上比 bfloat16 的
+# PyTorch 快好几倍（实测 bf16 单题要 5-14 分钟）。GGUF 没下完就退回原服务。
+$mathGgufDir = Join-Path $root 'models\Qwen2.5-Math-7B-Instruct-GGUF'
+$mathGgufReady = $false
+if (Test-Path -LiteralPath $mathGgufDir) {
+  $mathPending = @(Get-ChildItem -LiteralPath $mathGgufDir -Filter '*.part' -File -ErrorAction SilentlyContinue)
+  $mathWeights = @(Get-ChildItem -LiteralPath $mathGgufDir -Filter '*.gguf' -File -ErrorAction SilentlyContinue)
+  if ($mathPending.Count -eq 0 -and $mathWeights.Count -gt 0) { $mathGgufReady = $true }
+}
+
 if (-not (Test-ListeningPort 8090)) {
+  $mathScript = if ($mathGgufReady) { 'start-math-llama-server.ps1' } else { 'start-math-server.ps1' }
   Start-Process -FilePath $psExe -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit',
-    '-File', (Join-Path $root 'scripts\start-math-server.ps1')
+    '-File', (Join-Path $root "scripts\$mathScript")
   ) -WorkingDirectory $root
 }
 

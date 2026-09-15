@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildInsertSql, buildRecordsSql, buildIpStatsSql, sanitizeValue, toSqlLiteral, resetDbTransport } from './db.mjs';
+import {
+  buildInsertSql,
+  buildRecordsSql,
+  buildIpStatsSql,
+  buildEnsureSchemaSql,
+  buildHistorySql,
+  buildHistoryDetailSql,
+  extractMarkedPayload,
+  sanitizeValue,
+  toSqlLiteral,
+  resetDbTransport,
+} from './db.mjs';
 
 test('sanitizeValue 剔除 NUL 与危险控制字符', () => {
   assert.equal(sanitizeValue('a\0b\u0007c'), 'abc');
@@ -61,3 +72,43 @@ test('buildIpStatsSql 按客户端 IP 汇总', () => {
   assert.ok(sql.includes('GROUP BY client_ip'));
   assert.ok(sql.includes('ORDER BY MAX(id) DESC'));
 });
+
+test('buildInsertSql 顺带写入结果快照，供历史记录回看', () => {
+  const sql = buildInsertSql({
+    clientIp: '127.0.0.1',
+    kind: 'generate',
+    questionText: '出题：散文阅读',
+    result: { question: '阅读下文', referenceAnswer: '春季' },
+  });
+  assert.ok(sql.includes('result_json'));
+  assert.ok(sql.includes('阅读下文'));
+  // 不传结果时保持 NULL，不写空 JSON
+  const without = buildInsertSql({ clientIp: '127.0.0.1', questionText: 'x' });
+  assert.ok(without.trimEnd().endsWith('NULL );'));
+});
+
+test('buildEnsureSchemaSql 幂等补列并建索引', () => {
+  const sql = buildEnsureSchemaSql();
+  assert.ok(sql.includes("COL_LENGTH('dbo.query_records', 'result_json') IS NULL"));
+  assert.ok(sql.includes('ALTER TABLE dbo.query_records ADD result_json NVARCHAR(MAX) NULL'));
+  assert.ok(sql.includes('IX_query_records_client_ip'));
+});
+
+test('buildHistorySql 支持按 IP 与题类过滤（含注入转义）', () => {
+  const sql = buildHistorySql("1.2.3.4'; DROP TABLE x;--", 'generate', 0, 20);
+  assert.ok(sql.includes("client_ip = N'1.2.3.4''; DROP TABLE x;--'"));
+  assert.ok(sql.includes("ISNULL(JSON_VALUE(model_calls, '$.kind'), 'solve') = N'generate'"));
+  assert.ok(sql.includes('OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY'));
+  assert.ok(sql.includes('has_result'));
+  const all = buildHistorySql('', '', 0, 10);
+  assert.ok(!all.includes('WHERE'));
+});
+
+test('结果快照走前缀标记的纯文本通道，长 JSON 不会被 XML 截断', () => {
+  const sql = buildHistoryDetailSql(42);
+  assert.ok(sql.includes('AITJSON>>'));
+  assert.ok(sql.includes('WHERE id = 42'));
+  assert.equal(extractMarkedPayload('AITJSON>>{"a":1}\r\n'), '{"a":1}');
+  assert.equal(extractMarkedPayload('无标记'), '');
+});
+

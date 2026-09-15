@@ -15,7 +15,7 @@
 | 5173 | 前端 dev（Vite） | 生产模式由 8787 从 `dist/` 提供静态资源 |
 | 8787 | 后端（Node, `server/index.mjs`） | 唯一对外入口 |
 | 8080 | 视觉模型 llama.cpp | Qwen3-VL-4B-Instruct，`-ngl 99` |
-| 8090 | 数学服务（`math_service/`） | Qwen2.5-Math-7B-Instruct，bf16 + CPU，按需懒加载 |
+| 8090 | 数学服务（`math_service/` 或 llama.cpp） | 两种跑法，见下方「数学服务的两种运行时」 |
 | 8100 | 科学模型 llama.cpp | Intern-S1-mini GGUF Q8_0，**固定 `-ngl 0`（纯 CPU）** |
 
 - 模型分派逻辑集中在 `server/model-adapter.mjs` 的 `runVisionTask`。
@@ -38,13 +38,68 @@
 - 视觉结果为空（照片没读清、证明题、图内无文字）时由 `ensureVisibleAnswer()` 兜底，
   给出「换一张更清楚的照片再试 / 可勾选深度思考」的提示，**不得出现模型名**。
 - **数学服务的提示词必须显式要求中文输出**：Qwen2.5-Math-7B 训练语料偏英文，
-  提示词里不写「一律使用简体中文作答」就会整篇用英文回答（`math_service/math_server.py`）。
+  提示词里不写「一律使用简体中文作答」就会整篇用英文回答（`math_service/math_server.py`，
+  llama.cpp 通道对应 `buildMathLlamaPrompt`，两处必须保持同一套要求）。
+- **只输出最终推导，不输出自我纠错**：视觉模型会把「等等，我算错了，重新来」这类
+  自言自语留在 `steps` 里，学生跟着看只会更乱。`isThinkingNoiseLine()` / `stripThinkingNoise()`
+  负责整行剔除；判定必须保守，不能误伤「所以」「那么」这类正常连接词。
+  单行全被过滤时列表项直接丢弃，但 `answer` 字段会原样保留（宁可留着也不能空）。
+
+## 3.1 数学服务的两种运行时（需求 7）
+
+| `MATH_MODEL_RUNTIME` | 服务 | 协议 | 特征 |
+| --- | --- | --- | --- |
+| `python`（默认回退） | `math_service/math_server.py` | `POST /math/solve`、`/math/generate`、`/math/health` | bf16 + PyTorch 纯 CPU，约 15 GB 内存，**单题 5–14 分钟** |
+| `llama.cpp`（推荐） | `scripts/start-math-llama-server.ps1` | OpenAI 兼容 `/v1/chat/completions` | Q4_K_M GGUF 约 4.4 GB，同一 CPU 上快数倍 |
+
+- 权重：`models/Qwen2.5-Math-7B-Instruct-GGUF/Qwen2.5-Math-7B-Instruct-Q4_K_M.gguf`，
+  下载入口 `python scripts/download_math_gguf.py`（可断点续传，日志 `.cache/download-math-gguf.log`）。
+- **后端必须与实际启动的服务对上**：`scripts/start-backend.ps1` 自动检测权重是否下完，
+  在就设 `MATH_MODEL_RUNTIME=llama.cpp`，否则退回 `python`；`scripts/one-click-start.ps1`
+  同步决定拉起哪个脚本。两边判断逻辑要一致，否则会出现「协议对不上、数学永远回退」。
+- 数学服务同样不给 GPU：8 GB 卡被视觉模型与桌面应用占满，开 offload 会「加载成功但首个请求永久挂住」。
+
+## 3.2 出题规则（需求 1/3/10）
+
+- **题型挂在知识点上，不挂在学科上**（`server/knowledge-points.mjs`）：
+  `questionTypeRules` 按关键词顺序匹配，命中不了回落 `subjectDefaultQuestionTypes`。
+  「散文阅读」不得出现「作文题」，「写作」只给作文题；数学不得出现阅读题/作文题。
+- 前端下拉框/按钮只用 `/api/knowledge-points` 下发的 `questionTypes`，学科级列表只作兜底；
+  后端仍要再校验一次（`resolveQuestionType`），非法组合静默回落到白名单首项，**不报错打断出题**。
+- **复合知识点**：最多 3 个（`MAX_POINTS_PER_QUESTION`），题型取交集，
+  无交集时退化成并集（如「散文阅读 + 写作」）。prompt 必须要求「融合在同一道题里，不能各出一道」。
+- **批量出题 / 整卷**：`POST /api/generate/batch`，请求体
+  `{ stage, subject, selections: [{ knowledgePointIds, questionType, difficulty, count }] }`，
+  响应是 **NDJSON 流**（`plan` → 若干 `question` / `failed` → `done`），前端边收边显示进度。
+  单次上限 `GENERATE_MAX_BATCH`（默认 12），单题型上限 20，并发 `GENERATE_BATCH_CONCURRENCY`（默认 1：
+  llama.cpp 默认只有一个 slot，并发只会排队并叠加超时）。
+  批量默认**不调用专用数学模型**（`useSpecialized: false`），否则一张卷子要一小时以上。
+- 输出 schema 新增字段（`RESULT_FIELDS`）：`material`（阅读原文）、`translation`（英语参考译文）、
+  `figure`（几何题的图形文字说明）、`questions`（一图多题的分题结果）。
+  提示词必须同时列出这些字段——**模型没有字段可放就会直接丢掉内容**（阅读题曾经只剩题目没有原文）。
+
+## 3.3 历史记录（需求 9）
+
+- 数据层 `server/db.mjs`：`query_records` 增加 `result_json` 列（`buildEnsureSchemaSql()` 幂等补列，
+  启动时 `initDbTransport()` 自动执行）；没有快照的老记录会标记 `hasResult: false`。
+- 列表 `GET /api/history?kind=&page=`（默认只看请求方 IP，`scope=all` 可放宽），
+  单条快照 `GET /api/history/<id>`。
+- 结果快照可能几 KB，**不要用 `FOR XML` 取**（属性里有转义与截断风险），
+  走 `AITJSON>>` 前缀标记的纯文本通道（`buildHistoryDetailSql` / `extractMarkedPayload`）。
 
 ## 4. UI 红线
 
 - 界面上**不得出现任何"某情况调用某模型"的说明文字**（引擎提示、分流提示、结果页引擎徽章均已删除，勿恢复）。
 - 「复制结果」剔除结果的 `mode` 字段。
 - **例外**：左下角「本地模型」就绪状态面板（视觉/数学/科学三行绿点）必须保留，数据来自 `/api/health`。
+- **答案默认收起**：搜题/出题的答案与解析默认折叠，学生点「展开查看」才显示；
+  批改模式「批改结论」反过来默认展开。打印时由 `@media print` 强制展开，
+  不允许出现「导出的文档里答案不见了」。
+- **主题与字号**（`client/src/theme.mjs`）：偏好存 localStorage，解析结果写
+  `<html data-theme="light|dark">`、字号写 `<html data-scale="small|normal|large">`。
+  颜色一律走 `styles.css` 顶部的 CSS 变量，**不允许在组件里新写死颜色**，否则深色模式会花。
+- **导出**（`client/src/export.mjs`）：打印走 `@media print`（隐藏顶栏/侧栏/按钮）；
+  Word 导出是「HTML 伪装 .doc」，Word/WPS 可直接打开编辑，不引第三方库。
 
 ## 5. 知识点库
 
@@ -55,7 +110,7 @@
 ## 6. 常用命令
 
 ```powershell
-# 后端测试（Node 内置测试器，当前 57 项）
+# 后端测试（Node 内置测试器，当前 92 项）
 node --test server/*.test.mjs
 
 # 模型服务测试
@@ -68,6 +123,9 @@ npm run build        # 即 vite build
 start-ai-teacher.bat
 ```
 
+前端目录约定：`App.jsx`（外壳 + 三种任务表单）、`result-view.jsx`（结果区，历史记录复用）、
+`history-panel.jsx`、`theme.mjs`、`export.mjs`、`styles.css`（全部颜色变量在此）。
+
 ## 7. 本机开发陷阱（Windows）
 
 - 所有 `.ps1` 脚本必须保存为 **UTF-8 带 BOM**，否则 PowerShell 5.1 按 GBK 解码中文注释会随机报语法错误。
@@ -79,8 +137,9 @@ start-ai-teacher.bat
 
 ## 8. 数据与隐私
 
-- 答题记录（客户端 IP、题目文本、模型调用记录、时间）存入本机 SQL Server（`AITeacherDB`），
-  表结构见 `server/db.mjs`，设计目标：后续可整体迁移云端、按用户管理。
+- 答题记录（客户端 IP、题目文本、模型调用记录、时间、**结果快照 `result_json`**）存入本机 SQL Server
+  （`AITeacherDB`），表结构见 `server/db.mjs`，设计目标：后续可整体迁移云端、按用户管理。
+- 学生端历史记录默认只查请求方 IP（`GET /api/history`），管理端 `/admin` 才看得到全网段。
 - `models/`、`runtime/`（约 41 GB 模型与便携运行时）**不入 Git**；仓库只含代码与文档。
 - 前端截图、课件等个人材料不入库。
 

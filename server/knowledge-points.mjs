@@ -211,6 +211,104 @@ const stageSubjectSeeds = {
   },
 };
 
+// ---- 题型白名单 ----
+// 题型必须挂在「知识点」上，不能只挂在「学科」上：否则「散文阅读」也能选「作文题」，
+// 模型拿到一个自相矛盾的要求只能硬凑（需求 1）。规则按顺序匹配，先命中先用；
+// 命中不了就回落到学科默认题型。
+export const QUESTION_TYPES = [
+  '选择题',
+  '填空题',
+  '判断题',
+  '解答题',
+  '计算题',
+  '简答题',
+  '阅读题',
+  '作文题',
+  '实验探究题',
+];
+
+const list = (...types) => types;
+
+const questionTypeRules = {
+  语文: [
+    { test: /写作|作文/, types: list('作文题') },
+    { test: /字音字形|词语|拼音|识字|口语交际|古诗文积累|名篇名句|默写|语言|常识/, types: list('选择题', '填空题', '判断题') },
+    { test: /阅读|鉴赏|文言|古诗|现代文|小说|散文|议论文|说明文|记叙文|论述类|文学类|实用类|文本/, types: list('阅读题', '选择题', '填空题', '简答题') },
+    { test: /修辞|句子|标点/, types: list('选择题', '填空题', '简答题') },
+  ],
+  英语: [
+    { test: /写作|表达|作文/, types: list('作文题') },
+    { test: /完形|七选五|语法填空/, types: list('填空题', '选择题', '阅读题') },
+    { test: /阅读|理解/, types: list('阅读题', '选择题', '填空题') },
+    { test: /时态|语态|语气|从句|代词|名词|冠词|疑问句|语音|字母|交际|词汇|词类|成分|语法|句型|听力|现在|过去|将来|完成|比较级|最高级|介词|连词|数词|动词|主谓|虚拟|倒装|时/, types: list('选择题', '填空题') },
+  ],
+  数学: [
+    { test: /应用|建模|解决问题|实际/, types: list('解答题', '选择题', '填空题') },
+    { test: /统计|概率/, types: list('解答题', '选择题', '填空题') },
+    { test: /几何|图形|三角形|四边形|圆|角|体积|面积|平移|旋转|对称/, types: list('解答题', '选择题', '填空题', '计算题') },
+    { test: /运算|计算|化简|因式分解|解方程|方程|函数|不等式/, types: list('计算题', '选择题', '填空题', '解答题') },
+  ],
+  物理: [
+    { test: /实验|探究/, types: list('实验探究题', '填空题', '解答题', '选择题') },
+    { test: /电场|磁场|电流|欧姆|能量|动量|运动|力|密度|压强|浮力|定律|振动|波|引力|计算/, types: list('计算题', '选择题', '填空题', '解答题') },
+  ],
+  化学: [
+    { test: /实验|探究|制备|检验/, types: list('实验探究题', '填空题', '解答题') },
+    { test: /计算|物质的量|浓度/, types: list('计算题', '选择题', '填空题') },
+  ],
+  生物: [
+    { test: /实验|探究/, types: list('实验探究题', '填空题', '解答题') },
+  ],
+  地理: [
+    { test: /计算|时区|太阳高度/, types: list('计算题', '选择题', '填空题') },
+  ],
+};
+
+const subjectDefaultQuestionTypes = {
+  语文: list('选择题', '填空题', '阅读题', '简答题'),
+  数学: list('选择题', '填空题', '解答题', '计算题'),
+  英语: list('选择题', '填空题', '阅读题', '作文题'),
+  物理: list('选择题', '填空题', '解答题', '实验探究题'),
+  化学: list('选择题', '填空题', '解答题', '实验探究题'),
+  生物: list('选择题', '填空题', '解答题', '实验探究题'),
+  地理: list('选择题', '填空题', '解答题'),
+};
+
+export function resolveQuestionTypes(subject, pointName = '') {
+  const name = String(pointName);
+  for (const rule of questionTypeRules[subject] ?? []) {
+    if (rule.test.test(name)) return [...rule.types];
+  }
+  return [...(subjectDefaultQuestionTypes[subject] ?? ['选择题', '填空题', '解答题'])];
+}
+
+// 请求里的题型若不属于该知识点，就静默回落到白名单首项，而不是把矛盾要求丢给模型。
+export function resolveQuestionType(point, requested) {
+  const allowed = point?.questionTypes?.length ? point.questionTypes : ['解答题'];
+  const wanted = String(requested ?? '').trim();
+  return allowed.includes(wanted) ? wanted : allowed[0];
+}
+
+export function isQuestionTypeAllowed(point, requested) {
+  return Boolean(point?.questionTypes?.includes(String(requested ?? '').trim()));
+}
+
+// 复合知识点时，题型得同时适用于每个知识点：先取交集。
+// 「散文阅读 + 写作」这类没有交集的组合不返回空（否则用户无从下手），
+// 退化成并集，由用户自行选择。
+export function intersectQuestionTypes(points = []) {
+  const lists = points.map((point) => (point?.questionTypes?.length ? point.questionTypes : ['解答题']));
+  if (!lists.length) return ['解答题'];
+  if (lists.length === 1) return [...lists[0]];
+  const shared = lists[0].filter((type) => lists.slice(1).every((list) => list.includes(type)));
+  if (shared.length) return shared;
+  const merged = [];
+  for (const list of lists) {
+    for (const type of list) if (!merged.includes(type)) merged.push(type);
+  }
+  return merged;
+}
+
 function slugify(stage, subject, index, id) {
   if (id) return id;
   const stageSlug = { 小学: 'primary', 初中: 'middle', 高中: 'high' }[stage];
@@ -229,6 +327,7 @@ const points = Object.entries(stageSubjectSeeds).flatMap(([stage, subjects]) =>
         subject,
         name: title,
         description,
+        questionTypes: resolveQuestionTypes(subject, title),
         examples: [
           `${title}基础练习`,
           `${title}综合应用`,
@@ -239,7 +338,11 @@ const points = Object.entries(stageSubjectSeeds).flatMap(([stage, subjects]) =>
 );
 
 export function getKnowledgePoints() {
-  return points.map((point) => ({ ...point, examples: [...point.examples] }));
+  return points.map((point) => ({
+    ...point,
+    questionTypes: [...point.questionTypes],
+    examples: [...point.examples],
+  }));
 }
 
 export function findKnowledgePoint(id) {

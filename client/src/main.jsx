@@ -1,7 +1,11 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
+import { initTheme } from './theme.mjs';
 import './styles.css';
+
+// 主题要在首屏渲染前落到 <html> 上，否则深色模式会先白闪一下。
+initTheme();
 
 class AppErrorBoundary extends React.Component {
   state = { hasError: false };
