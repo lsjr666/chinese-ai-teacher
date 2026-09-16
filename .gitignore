@@ -7,6 +7,9 @@ node_modules/
 dist/
 .venv/
 
+# 交付文档（本地交付物：含内网端口、SQL Server 实例、IP 策略等细节，不入公开仓库）
+deliverables/
+
 # 本地缓存与工具产物
 .cache/
 .workbuddy/
